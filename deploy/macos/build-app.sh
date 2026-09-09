@@ -13,6 +13,9 @@ set -euo pipefail
 #   OPENOCTA_GON=1     — 使用 gon 对 src/build/bin/OpenOcta.app 做签名+公证+staple（需已安装 gon）
 #   GON_CONFIG         — gon 配置文件路径（默认 <仓库根>/gon-sign.json）
 #   AC_USERNAME / AC_PASSWORD / AC_TEAM_ID — gon 配置中的 Apple ID 凭据（推荐使用 App-Specific Password）
+#
+# 签名前会将 deploy/macos/libffi/<arch>/libffi.8.dylib 放入 Contents/Frameworks，
+# 并在 OPENOCTA_GON=1 时先对该 dylib codesign，再 gon 签整包（避免 AMFI 拦截无签名 libffi）。
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -35,6 +38,50 @@ if [[ ! -d "${APP}" ]]; then
   exit 1
 fi
 
+# Bundle libffi.8.dylib into Contents/Frameworks (yzma → jupiterrider/ffi).
+# Unsigned runtime extract under ~/Library/Caches is blocked by AMFI under Hardened Runtime.
+bundle_libffi() {
+  local bin frameworks src_dylib ffi_arch archs
+  bin="${APP}/Contents/MacOS/OpenOcta"
+  frameworks="${APP}/Contents/Frameworks"
+  ffi_arch=""
+  if [[ "${ARCH:-}" == "arm64" ]]; then
+    ffi_arch="darwin_arm64"
+  elif [[ "${ARCH:-}" == "amd64" ]]; then
+    ffi_arch="darwin_amd64"
+  elif [[ -f "${bin}" ]]; then
+    archs="$(lipo -archs "${bin}" 2>/dev/null || true)"
+    if [[ "${archs}" == *arm64* ]]; then
+      ffi_arch="darwin_arm64"
+    elif [[ "${archs}" == *x86_64* ]]; then
+      ffi_arch="darwin_amd64"
+    fi
+  fi
+  if [[ -z "${ffi_arch}" ]]; then
+    echo "WARN: 无法判定架构，跳过 libffi.8.dylib 打包" >&2
+    return 0
+  fi
+  src_dylib="${ROOT}/deploy/macos/libffi/${ffi_arch}/libffi.8.dylib"
+  if [[ ! -f "${src_dylib}" ]]; then
+    echo "ERROR: 缺少 ${src_dylib}（见 deploy/macos/libffi/ORIGIN.txt）" >&2
+    exit 1
+  fi
+  echo "==> 打包 libffi.8.dylib → Contents/Frameworks（${ffi_arch}）..."
+  mkdir -p "${frameworks}"
+  # modcache / vendor 文件可能只读；install_name_tool / codesign 需要可写
+  cp -f "${src_dylib}" "${frameworks}/libffi.8.dylib"
+  chmod u+w "${frameworks}/libffi.8.dylib"
+  chmod 755 "${frameworks}/libffi.8.dylib"
+  if command -v install_name_tool >/dev/null 2>&1; then
+    install_name_tool -id "@rpath/libffi.8.dylib" "${frameworks}/libffi.8.dylib" 2>/dev/null || true
+  fi
+  if [[ -f "${ROOT}/deploy/macos/libffi/LICENSE" ]]; then
+    cp -f "${ROOT}/deploy/macos/libffi/LICENSE" "${frameworks}/libffi-LICENSE.txt"
+  fi
+}
+
+bundle_libffi
+
 if [[ "${OPENOCTA_GON:-0}" = "1" ]]; then
   if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "WARN: OPENOCTA_GON=1 但当前不是 macOS，跳过 gon" >&2
@@ -46,6 +93,17 @@ if [[ "${OPENOCTA_GON:-0}" = "1" ]]; then
     if [[ ! -f "${GON_CFG}" ]]; then
       echo "ERROR: 未找到 gon 配置: ${GON_CFG}" >&2
       exit 1
+    fi
+    # Nested Mach-O in Frameworks must be signed before the outer .app (inside-out).
+    IDENTITY="$(sed -n 's/.*"application_identity"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${GON_CFG}" | head -1)"
+    if [[ -z "${IDENTITY}" ]]; then
+      echo "ERROR: ${GON_CFG} 未找到 application_identity" >&2
+      exit 1
+    fi
+    if [[ -f "${APP}/Contents/Frameworks/libffi.8.dylib" ]]; then
+      echo "==> codesign: Frameworks/libffi.8.dylib（${IDENTITY}）..."
+      codesign --force --options runtime --timestamp --sign "${IDENTITY}" \
+        "${APP}/Contents/Frameworks/libffi.8.dylib"
     fi
     echo "==> gon: 对 OpenOcta.app 进行签名/公证（配置: ${GON_CFG}）..."
     # gon 会读取配置内的 source；本仓库默认配置指向 ./src/build/bin/OpenOcta.app

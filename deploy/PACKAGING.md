@@ -73,6 +73,8 @@ GoReleaser 构建服务端二进制，**不涉及 Wails**。配置见 `.goreleas
 
 配置：`gon-sign.json`（凭据从环境变量读取）。设置 `OPENOCTA_GON=1` 或在 `make wails-dmg-signed` 流程中启用。
 
+打包时会把 `deploy/macos/libffi/<arch>/libffi.8.dylib` 放入 `OpenOcta.app/Contents/Frameworks/`，并在 gon 之前用同一 Developer ID 对其 codesign（Hardened Runtime / AMFI 要求；yzma → jupiterrider/ffi 运行时解压的缓存副本无签名）。应用启动时会用 Frameworks 内已签名副本覆盖 `~/Library/Caches/.../libffi.8.dylib`。
+
 ```bash
 export AC_USERNAME="you@example.com"
 export AC_PASSWORD="app-specific-password"
