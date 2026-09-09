@@ -75,8 +75,10 @@ bundle_libffi() {
   if command -v install_name_tool >/dev/null 2>&1; then
     install_name_tool -id "@rpath/libffi.8.dylib" "${frameworks}/libffi.8.dylib" 2>/dev/null || true
   fi
+  # LICENSE 不能放进 Frameworks：codesign 会把该目录下文件当作嵌套 code object。
   if [[ -f "${ROOT}/deploy/macos/libffi/LICENSE" ]]; then
-    cp -f "${ROOT}/deploy/macos/libffi/LICENSE" "${frameworks}/libffi-LICENSE.txt"
+    mkdir -p "${APP}/Contents/Resources"
+    cp -f "${ROOT}/deploy/macos/libffi/LICENSE" "${APP}/Contents/Resources/libffi-LICENSE.txt"
   fi
 }
 
